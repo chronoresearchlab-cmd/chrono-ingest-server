@@ -1,10 +1,19 @@
+# ---- Build environment ----
 FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+# Copy the app code
+COPY . .
 
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "main:app"]
+# Fly.io expects the app to listen on PORT=8080
+ENV PORT=8080
+
+EXPOSE 8080
+
+# Start the Flask app
+CMD ["python", "main.py"]
