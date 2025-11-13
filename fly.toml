@@ -13,3 +13,6 @@ primary_region = "nrt"
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
+
+[experimental]
+  allowed_http_versions = ["1"]
