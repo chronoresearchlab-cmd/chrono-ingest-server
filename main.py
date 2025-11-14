@@ -45,7 +45,8 @@ def ingest():
         # -----------------------------
         # ② ChronoTrace 正規化
         # -----------------------------
-        normalized = normalizer.normalize_payload(raw)
+        # after
+        normalized = normalizer.normalize_dict(raw)
 
         # -----------------------------
         # ③ Influx Point 生成
