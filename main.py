@@ -3,71 +3,73 @@ from flask import Flask, request, jsonify
 from influxdb_client import InfluxDBClient, Point, WritePrecision, WriteOptions
 from modules.chronotrace_normalizer import ChronoTraceNormalizer
 
-# -----------------------------------------------------
-# Flask App
-# -----------------------------------------------------
 app = Flask(__name__)
 
 # -----------------------------------------------------
-# InfluxDB Client 初期化
+# InfluxDB base settings (共通)
 # -----------------------------------------------------
 INFLUX_URL = os.getenv("INFLUX_URL")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
 INFLUX_ORG = os.getenv("INFLUX_ORG")
-INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")   # ← sandboxなら chrono_test を設定
+
+# バケット切り替え用
+BUCKETS = {
+    "prod": os.getenv("INFLUX_BUCKET"),        # 本番
+    "sandbox": os.getenv("INFLUX_BUCKET_SB"),  # sandbox モード
+}
 
 client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 write_api = client.write_api(write_options=WriteOptions(batch_size=1))
 query_api = client.query_api()
 
-# -----------------------------------------------------
-# Normalizer 初期化
-# -----------------------------------------------------
+# Normalizer
 normalizer = ChronoTraceNormalizer()
 
+
 # -----------------------------------------------------
-#  POST /ingest（Normalizer 版）
+# POST /ingest
 # -----------------------------------------------------
 @app.route("/ingest", methods=["POST"])
 def ingest():
-    """
-    JSON例:
-    {
-      "measurement": "ultralight_trace",
-      "tags": {...},
-      "fields": {...},
-      "timestamp": "2025-11-14T05:12:00Z"
-    }
-    """
     raw = request.json
-
     if not raw:
         return jsonify({"status": "error", "reason": "no JSON payload"}), 400
 
     try:
-        # 正規化
+        # -----------------------------
+        # ① mode 判定
+        # -----------------------------
+        mode = request.args.get("mode", raw.get("mode", "prod"))
+        bucket = BUCKETS.get(mode, BUCKETS["prod"])
+
+        # -----------------------------
+        # ② ChronoTrace 正規化
+        # -----------------------------
         normalized = normalizer.normalize_payload(raw)
 
-        # Influx Point 作成
+        # -----------------------------
+        # ③ Influx Point 生成
+        # -----------------------------
         point = (
             Point(normalized["measurement"])
             .time(normalized["timestamp"], WritePrecision.NS)
         )
 
-        # tags
         for k, v in normalized["tags"].items():
             point = point.tag(k, v)
 
-        # fields
         for k, v in normalized["fields"].items():
             point = point.field(k, v)
 
-        # 書き込み
-        write_api.write(bucket=INFLUX_BUCKET, record=point)
+        # -----------------------------
+        # ④ 書き込み (← modeによる bucket 切り替え)
+        # -----------------------------
+        write_api.write(bucket=bucket, record=point)
 
         return jsonify({
             "status": "ok",
-            "bucket": INFLUX_BUCKET,
+            "mode": mode,
+            "bucket": bucket,
             "normalized": normalized
         })
 
@@ -76,17 +78,20 @@ def ingest():
 
 
 # -----------------------------------------------------
-#  GET /last?measurement=xxx
+# GET /last?measurement=xxx&mode=sandbox
 # -----------------------------------------------------
 @app.route("/last", methods=["GET"])
 def last_record():
     try:
-        measurement = request.args.get("measurement", None)
+        measurement = request.args.get("measurement")
         if not measurement:
             return jsonify({"status": "error", "reason": "measurement required"}), 400
 
+        mode = request.args.get("mode", "prod")
+        bucket = BUCKETS.get(mode, BUCKETS["prod"])
+
         query = f'''
-        from(bucket: "{INFLUX_BUCKET}")
+        from(bucket: "{bucket}")
           |> range(start: -30d)
           |> filter(fn: (r) => r._measurement == "{measurement}")
           |> sort(columns: ["_time"], desc: true)
@@ -105,22 +110,27 @@ def last_record():
                     "tags": record.values
                 })
 
-        return jsonify({"status": "success", "data": results})
+        return jsonify({
+            "status": "success",
+            "mode": mode,
+            "bucket": bucket,
+            "data": results
+        })
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # -----------------------------------------------------
-#  Index
+# index
 # -----------------------------------------------------
 @app.route("/")
 def index():
-    return f"ChronoNeura Ingest Server — OK (bucket={INFLUX_BUCKET})"
+    return "ChronoNeura Ingest Server — mode-switch enabled"
 
 
 # -----------------------------------------------------
-#  Run App
+# main
 # -----------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
