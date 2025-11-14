@@ -1,89 +1,97 @@
 # routes/query_api.py
-from flask import Blueprint, request, jsonify
-from utils.influx_client import query_api
-from modules.bucket_selector import select_bucket
+# ChronoNeura Query API v1
+#
+# - sandbox / prod の Mode で bucket を自動切替
+# - influx_client.query() に集約
+# - bucket_selector に完全準拠
+#
 
-query_bp = Blueprint("query_api", __name__)
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from utils.influx_client import influx_client
+from utils.bucket_selector import bucket_selector
+from utils.normalizer import ChronoTraceNormalizer
+
+router = APIRouter()
+normalizer = ChronoTraceNormalizer()
 
 
-# ================================
-# 1. /last?measurement=xxx&mode=sandbox
-# ================================
-@query_bp.route("/last", methods=["GET"])
-def last_record():
+# -------------------------------
+# Pydantic Model
+# -------------------------------
+class QueryPayload(BaseModel):
+    bucket: str | None = None
+    mode: str | None = None       # "sandbox" / "prod"
+    measurement: str | None = None
+    limit: int | None = 100
+    start: str | None = None      # RFC3339
+    stop: str | None = None       # RFC3339
+    raw_query: str | None = None  # 直接 Flux クエリを書く場合
+
+
+# -------------------------------
+# POST /query
+# -------------------------------
+@router.post("/query")
+async def run_query(payload: QueryPayload):
     """
-    指定 measurement の最新1件を返す
-    mode = prod / sandbox
+    ChronoNeura Query Endpoint.
+    - bucket selector
+    - key normalization for measurement
+    - safe limit
+    - raw Flux query override
     """
-    measurement = request.args.get("measurement")
-    if not measurement:
-        return jsonify({"status": "error", "reason": "measurement required"}), 400
-
-    mode = request.args.get("mode", "prod")
-    bucket = select_bucket(mode)
-
-    flux = f'''
-    from(bucket: "{bucket}")
-      |> range(start: -30d)
-      |> filter(fn: (r) => r._measurement == "{measurement}")
-      |> sort(columns: ["_time"], desc: true)
-      |> limit(n: 1)
-    '''
 
     try:
-        tables = query_api.query(query=flux)
-        results = []
+        # 1) bucket automatic selection
+        bucket = bucket_selector.select(payload.mode)
 
-        for table in tables:
-            for record in table.records:
-                results.append({
-                    "time": str(record.get_time()),
-                    "field": record.get_field(),
-                    "value": record.get_value(),
-                    "tags": record.values
-                })
+        if payload.bucket:
+            bucket = payload.bucket
 
-        return jsonify({"status": "ok", "bucket": bucket, "data": results})
+        # 2) measurement normalization
+        measurement = None
+        if payload.measurement:
+            measurement = normalizer.normalize_key(payload.measurement)
 
-    except Exception as e:
-        return jsonify({"status": "error", "reason": str(e)}), 500
+        # 3) raw query override
+        if payload.raw_query:
+            flux_query = payload.raw_query
+        else:
+            # Generate minimal Flux query
+            if not measurement:
+                raise HTTPException(
+                    status_code=400,
+                    detail="measurement または raw_query が必要です"
+                )
 
+            # Time range
+            time_range = ""
+            if payload.start and payload.stop:
+                time_range = f'|> range(start: {payload.start}, stop: {payload.stop})'
+            else:
+                time_range = "|> range(start: -7d)"   # default 7 days
 
+            flux_query = f'''
+from(bucket: "{bucket}")
+    {time_range}
+    |> filter(fn: (r) => r["_measurement"] == "{measurement}")
+    |> limit(n: {payload.limit})
+'''
 
-# ================================
-# 2. /query （任意 Flux クエリ実行）
-# ================================
-@query_bp.route("/query", methods=["POST"])
-def raw_query():
-    """
-    {
-        "mode": "sandbox",
-        "flux": "from(bucket:\"chrono_test\") |> range(start:-1h)"
-    }
-    """
-    body = request.json or {}
-    mode = body.get("mode", "prod")
-    flux = body.get("flux")
+        # 4) Execute query
+        rows = influx_client.query(flux_query)
 
-    if not flux:
-        return jsonify({"status": "error", "reason": "flux script required"}), 400
-
-    # bucket が flux 内で正しく参照されているかは利用者に委ねる
-    try:
-        tables = query_api.query(query=flux)
-        results = []
-
-        for table in tables:
-            for record in table.records:
-                results.append({
-                    "time": str(record.get_time()),
-                    "measurement": record.get_measurement(),
-                    "field": record.get_field(),
-                    "value": record.get_value(),
-                    "tags": record.values
-                })
-
-        return jsonify({"status": "ok", "mode": mode, "data": results})
+        return {
+            "status": "ok",
+            "bucket": bucket,
+            "measurement": measurement,
+            "query": flux_query,
+            "results": rows
+        }
 
     except Exception as e:
-        return jsonify({"status": "error", "reason": str(e)}), 500
+        raise HTTPException(
+            status_code=500,
+            detail=f"Query failed: {str(e)}"
+            )
