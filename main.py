@@ -6,7 +6,7 @@ from modules.chronotrace_normalizer import ChronoTraceNormalizer
 app = Flask(__name__)
 
 # -----------------------------------------------------
-# InfluxDB base settings (共通)
+# InfluxDB base settings (共通) 
 # -----------------------------------------------------
 INFLUX_URL = os.getenv("INFLUX_URL")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
