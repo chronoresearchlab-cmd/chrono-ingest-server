@@ -1,3 +1,44 @@
+from flask import Flask, request, jsonify
+import os
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+
+app = Flask(__name__)
+
+# ============================
+#  Load Fly.io Secrets
+# ============================
+INFLUX_URL = os.getenv("INFLUX_URL")
+INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
+INFLUX_ORG = os.getenv("INFLUX_ORG")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")
+
+# Debug print to confirm secrets loaded (will show in Fly logs)
+print("ENV CHECK:",
+      "URL =", INFLUX_URL,
+      "ORG =", INFLUX_ORG,
+      "BUCKET =", INFLUX_BUCKET)
+
+# ============================
+#  Init InfluxDB Client
+# ============================
+try:
+    client = InfluxDBClient(
+        url=INFLUX_URL,
+        token=INFLUX_TOKEN,
+        org=INFLUX_ORG
+    )
+    write_api = client.write_api()
+    query_api = client.query_api()
+    print("InfluxDB Client initialized OK")
+
+except Exception as e:
+    print("InfluxDB init error:", e)
+    raise e
+
+
+# ============================
+#  POST /ingest
+# ============================
 @app.route("/ingest", methods=["POST"])
 def ingest():
     try:
@@ -31,10 +72,9 @@ def ingest():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ------------------------------------------
-# 🔽 ここ！ ここに追加する！（重要）
-# ------------------------------------------
-
+# ============================
+#  GET /last?measurement=X
+# ============================
 @app.route("/last", methods=["GET"])
 def last_record():
     try:
@@ -48,7 +88,7 @@ def last_record():
           |> limit(n: 1)
         '''
 
-        tables = client.query_api().query(query, org=INFLUX_ORG)
+        tables = query_api.query(query)
 
         results = []
         for table in tables:
@@ -66,14 +106,16 @@ def last_record():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ------------------------------------------
-# ここから index() が続く
-# ------------------------------------------
-
+# ============================
+#  Index
+# ============================
 @app.route("/")
 def index():
-    return "ChronoNeura Ingest Server — Running on Fly.io"
+    return "ChronoNeura Ingest Server — Fly.io OK"
 
 
+# ============================
+#  Run App
+# ============================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
