@@ -1,40 +1,37 @@
-# modules/chronotrace_normalizer.py
+import re
 
 class ChronoTraceNormalizer:
+    """
+    ChronoTrace Key Normalizer v1
+    - Removes emoji / non-ASCII
+    - Converts unsafe chars to "_"
+    - Ensures keys start with letter or underscore
+    - Ensures measurement names not starting with digit
+    """
 
-    def normalize_dict(self, payload: dict) -> dict:
-        """
-        ChronoTrace Key Normalization
-        measurement/tags/fields をすべて正規化し、
-        InfluxDB に書き込める形式に整える。
-        """
+    def __init__(self, default_value="Unknown"):
+        self.default_value = default_value
 
-        return {
-            "measurement": self._norm_key(payload.get("measurement", "unknown")),
-            "tags": {self._norm_key(k): str(v) for k, v in payload.get("tags", {}).items()},
-            "fields": {
-                self._norm_key(k): self._auto_cast(v)
-                for k, v in payload.get("fields", {}).items()
-            },
-            "timestamp": payload.get("timestamp")
-        }
+    def normalize_key(self, raw: str) -> str:
+        if not raw:
+            return self.default_value
 
-    # -------------------------------
-    # internal helpers
-    # -------------------------------
-    def _norm_key(self, raw: str) -> str:
-        if raw is None:
-            return "unknown"
+        # Remove emoji / non-ASCII
+        normalized = re.sub(r"[^\x00-\x7F]+", "", raw)
 
-        key = str(raw)
-        key = key.replace(" ", "_")
-        key = ''.join(c for c in key if c.isascii())
+        # Replace all unsafe chars with "_"
+        normalized = re.sub(r"[^A-Za-z0-9_]", "_", normalized)
 
-        key = ''.join(c if (c.isalnum() or c == "_") else "_" for c in key)
+        # If begins with digit → prefix M_
+        if re.match(r"^[0-9]", normalized):
+            normalized = "M_" + normalized
 
-        if len(key) > 0 and key[0].isdigit():
-            key = "M_" + key
+        # Ensure fallback
+        return normalized or self.default_value
 
+    # For values — safe stringify
+    def normalize_value(self, v):
+        return str(v)
         return key if key != "" else "unknown"
 
     def _auto_cast(self, v):
