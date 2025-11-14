@@ -1,47 +1,17 @@
-# bucket_selector.py
-# ChronoNeura Influx Bucket Selector v1
-#
-# - "sandbox" または "prod" を安全に選択
-# - Fly.io の環境変数に完全準拠
-# - mode が変でも絶対に落ちない（フォールバック = 本番）
+# modules/bucket_selector.py
 
-
-import os
-
-
-class BucketSelector:
+def bucket_selector(mode: str | None, requested_bucket: str | None):
     """
-    ChronoNeura Bucket Selector
-    - mode = "sandbox" → INFLUX_BUCKET_SANDBOX
-    - mode = "prod" または None → INFLUX_BUCKET
-    - 不正値 → prod へ安全フォールバック
+    mode: "sandbox" or "prod"
+    requested_bucket: user指定の bucket（優先）
     """
 
-    def __init__(self):
-        self.bucket_prod = os.getenv("INFLUX_BUCKET", "chrono_trace")
-        self.bucket_sandbox = os.getenv("INFLUX_BUCKET_SANDBOX", "chrono_test")
+    # ユーザー指定があれば優先
+    if requested_bucket:
+        return requested_bucket
 
-    def select(self, mode: str | None) -> str:
-        """
-        Selects the proper bucket depending on mode.
-        Valid modes:
-            - "sandbox"
-            - "prod"
-            - None → defaults to prod
-        """
-
-        if mode is None:
-            return self.bucket_prod
-
-        m = str(mode).strip().lower()
-
-        # sandbox 明示指定
-        if m == "sandbox":
-            return self.bucket_sandbox
-
-        # 明示 prod または不正値 → prod
-        return self.bucket_prod
-
-
-# Singleton instance for easy import
-bucket_selector = BucketSelector()
+    # sandbox / prod の自動切替
+    if mode == "sandbox":
+        return "chrono_test"
+    else:
+        return "chrono_trace"
