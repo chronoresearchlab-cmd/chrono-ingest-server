@@ -19,7 +19,7 @@ print("ENV CHECK:",
       "BUCKET =", INFLUX_BUCKET)
 
 # ============================
-#  Init InfluxDB Client
+#  Init InfluxDB Client　
 # ============================
 try:
     client = InfluxDBClient(
