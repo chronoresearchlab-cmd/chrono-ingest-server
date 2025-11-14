@@ -1,19 +1,3 @@
-from flask import Flask, request, jsonify
-import os
-from influxdb_client import InfluxDBClient, Point, WritePrecision
-
-app = Flask(__name__)
-
-# ==== Fly.io Secrets ====
-INFLUX_URL = os.getenv("INFLUX_URL")
-INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
-INFLUX_ORG = os.getenv("INFLUX_ORG")
-INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")
-
-# ==== InfluxDB Client ====
-client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-write_api = client.write_api()
-
 @app.route("/ingest", methods=["POST"])
 def ingest():
     try:
@@ -30,7 +14,6 @@ def ingest():
             point.tag(k, str(v))
 
         for k, v in fields.items():
-            # 数値として書き込み（文字列なら float に変換）
             try:
                 v = float(v)
                 point.field(k, v)
@@ -42,14 +25,50 @@ def ingest():
 
         write_api.write(bucket=INFLUX_BUCKET, record=point)
 
-        return jsonify({
-            "status": "success",
-            "written": data
-        })
+        return jsonify({"status": "success", "written": data})
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+# ------------------------------------------
+# 🔽 ここ！ ここに追加する！（重要）
+# ------------------------------------------
+
+@app.route("/last", methods=["GET"])
+def last_record():
+    try:
+        measurement = request.args.get("measurement", "ingest_test")
+
+        query = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -30d)
+          |> filter(fn: (r) => r._measurement == "{measurement}")
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+        '''
+
+        tables = client.query_api().query(query, org=INFLUX_ORG)
+
+        results = []
+        for table in tables:
+            for record in table.records:
+                results.append({
+                    "time": str(record.get_time()),
+                    "field": record.get_field(),
+                    "value": record.get_value(),
+                    "tags": record.values
+                })
+
+        return jsonify({"status": "success", "data": results})
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ------------------------------------------
+# ここから index() が続く
+# ------------------------------------------
 
 @app.route("/")
 def index():
