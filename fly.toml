@@ -1,25 +1,48 @@
+# ===============================================
+# ChronoNeura Ingest Server – Fly.io Configuration
+# ===============================================
+
 app = "chrono-ingest-server"
 
 primary_region = "nrt"
 
+kill_signal = "SIGINT"
+kill_timeout = 5
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+# ---- FastAPI が使うポート ----
 [[services]]
   internal_port = 8080
-  protocol = "tcp"
-
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
-
-[http_service]
-  force_https = true
-  auto_stop_machines = true
-  auto_start_machines = true
-  min_machines_running = 1
   processes = ["app"]
 
-[experimental]
-  allowed_http_versions = ["http1"]
+  protocol = "tcp"
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  force_https = true
+
+  [services.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+# ---- VM サイズ設定（無料枠に最適化）----
+[processes]
+  app = "uvicorn main:app --host 0.0.0.0 --port 8080"
+
+[metrics]
+  port = 8080
+  path = "/health/status"
