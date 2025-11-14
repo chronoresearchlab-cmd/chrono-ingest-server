@@ -1,40 +1,47 @@
 # modules/chronotrace_normalizer.py
 
-import re
-from datetime import datetime
-
 class ChronoTraceNormalizer:
-    """
-    ChronoTrace Key Normalization Module
-    Implements: 🌟ChronoTrace_KeyNormalizationPolicy_v1
-    """
 
-    def __init__(self, default="Unknown"):
-        self.default = default
-
-    # -----------------------------------------------------
-    # 1. measurement/tags/fields のキーを正規化
-    # -----------------------------------------------------
-    def normalize_key(self, raw: str) -> str:
+    def normalize_dict(self, payload: dict) -> dict:
         """
-        規則:
-        1) 絵文字・全角文字 → 削除
-        2) 記号・空白 → "_"
-        3) 英数字と "_" のみ許可
-        4) 先頭が数字 → "M_" を付与
+        ChronoTrace Key Normalization
+        measurement/tags/fields をすべて正規化し、
+        InfluxDB に書き込める形式に整える。
         """
-        if not raw:
-            return self.default
 
-        # 絵文字・全角を削除
-        normalized = re.sub(r"[^\x00-\x7F]+", "", raw)
+        return {
+            "measurement": self._norm_key(payload.get("measurement", "unknown")),
+            "tags": {self._norm_key(k): str(v) for k, v in payload.get("tags", {}).items()},
+            "fields": {
+                self._norm_key(k): self._auto_cast(v)
+                for k, v in payload.get("fields", {}).items()
+            },
+            "timestamp": payload.get("timestamp")
+        }
 
-        # 記号を "_"
-        normalized = re.sub(r"[^A-Za-z0-9_]", "_", normalized)
+    # -------------------------------
+    # internal helpers
+    # -------------------------------
+    def _norm_key(self, raw: str) -> str:
+        if raw is None:
+            return "unknown"
 
-        # 先頭数字なら M_ を付ける
-        if re.match(r"^[0-9]", normalized):
-            normalized = "M_" + normalized
+        key = str(raw)
+        key = key.replace(" ", "_")
+        key = ''.join(c for c in key if c.isascii())
+
+        key = ''.join(c if (c.isalnum() or c == "_") else "_" for c in key)
+
+        if len(key) > 0 and key[0].isdigit():
+            key = "M_" + key
+
+        return key if key != "" else "unknown"
+
+    def _auto_cast(self, v):
+        try:
+            return float(v)
+        except:
+            return str(v)            normalized = "M_" + normalized
 
         return normalized or self.default
 
