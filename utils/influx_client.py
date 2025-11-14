@@ -1,79 +1,67 @@
 # utils/influx_client.py
-import os
-from influxdb_client import InfluxDBClient, WriteOptions
+# ChronoNeura InfluxDB Client v1
 
-# ======================================================
-# InfluxDB 設定（Fly.io Secret から取得）
-# ======================================================
+import os
+from influxdb_client import InfluxDBClient, Point, WriteOptions
+
 INFLUX_URL = os.getenv("INFLUX_URL")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
 INFLUX_ORG = os.getenv("INFLUX_ORG")
 
-# URL / TOKEN / ORG が未設定の場合は起動時に例外
-if not (INFLUX_URL and INFLUX_TOKEN and INFLUX_ORG):
-    raise Exception("InfluxDB 環境変数 (URL/TOKEN/ORG) が設定されていません。")
-
-
-# ======================================================
-# InfluxDB Client 生成（Singleton）
-# ======================================================
-influx_client = InfluxDBClient(
+# ------------------------------------
+# InfluxDB クライアント生成
+# ------------------------------------
+client = InfluxDBClient(
     url=INFLUX_URL,
     token=INFLUX_TOKEN,
     org=INFLUX_ORG,
-    timeout=30_000  # 30秒タイムアウト
+    timeout=10000,
 )
 
-# ======================================================
-# Write / Query API（共通で使用）
-# ======================================================
-write_api = influx_client.write_api(
-    write_options=WriteOptions(batch_size=1)  # 即時書き込み
-)
-
-query_api = influx_client.query_api()
+write_api = client.write_api(write_options=WriteOptions(batch_size=1))
+query_api = client.query_api()
 
 
-# ======================================================
-# 便利レイヤー：Ping / バケット存在チェック
-# ======================================================
-def check_connection():
-    """
-    InfluxDB ping 確認
-    """
+# ------------------------------------
+# 書き込みモジュール（正式名：influx_write_point）
+# ------------------------------------
+def influx_write_point(bucket: str, measurement: str, fields: dict, tags: dict, timestamp: str | None):
     try:
-        influx_client.ping()
+        p = Point(measurement)
+
+        # tags
+        for k, v in tags.items():
+            p = p.tag(k, v)
+
+        # fields
+        for k, v in fields.items():
+            p = p.field(k, v)
+
+        # timestamp
+        if timestamp:
+            p = p.time(timestamp)
+
+        write_api.write(bucket=bucket, record=p)
         return True
-    except:
-        return False
+
+    except Exception as e:
+        raise RuntimeError(f"Influx write failed: {e}")
 
 
-def bucket_exists(bucket_name: str) -> bool:
-    """
-    バケット存在確認（Sandbox / Prod 自動テストに使用）
-    """
+# ------------------------------------
+# クエリモジュール
+# ------------------------------------
+def influx_query(bucket: str, query: str):
     try:
-        buckets = influx_client.buckets_api().find_bucket_by_name(bucket_name)
-        return buckets is not None
-    except:
-        return False
+        q = f'from(bucket:"{bucket}") |> {query}'
+        tables = query_api.query(org=INFLUX_ORG, query=q)
 
+        results = []
+        for table in tables:
+            for row in table.records:
+                results.append(row.values)
 
-# ======================================================
-# 書き込み（低レベル API を隠蔽）
-# ======================================================
-def write_point(bucket: str, point):
-    """
-    Fly.io routes から統一して使用できる write wrapper。
-    """
-    write_api.write(bucket=bucket, record=point)
+        return results
 
-
-# ======================================================
-# Flux 実行（POST /query が利用）
-# ======================================================
-def run_flux(flux: str):
-    """
-    Flux クエリの実行をラップした関数。
-    """
-    return query_api.query(query=flux)
+    except Exception as e:
+        raise RuntimeError(f"Influx query failed: {e}")
