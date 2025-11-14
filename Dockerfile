@@ -1,19 +1,31 @@
-# ---- Build environment ----
+# ---------------------------------------------
+# ChronoNeura Ingest Server – Optimized Dockerfile
+# ---------------------------------------------
+
 FROM python:3.11-slim
 
+# Prevent Python from buffering logs
+ENV PYTHONUNBUFFERED=1
+
+# Working directory
 WORKDIR /app
 
-# Install Python dependencies
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy dependency list first (Docker layer caching optimization)
 COPY requirements.txt .
+
+# Install Python deps
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the app code
+# Copy app source
 COPY . .
 
-# Fly.io expects the app to listen on PORT=8080
-ENV PORT=8080
-
+# Expose port
 EXPOSE 8080
 
-# Start the Flask app
-CMD ["python", "main.py"]
+# Default command (FastAPI/Uvicorn)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
