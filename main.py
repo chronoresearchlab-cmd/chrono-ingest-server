@@ -1,137 +1,61 @@
-import os
-from flask import Flask, request, jsonify
-from influxdb_client import InfluxDBClient, Point, WritePrecision, WriteOptions
-from modules.chronotrace_normalizer import ChronoTraceNormalizer
+# main.py
+# ChronoNeura Ingest Server — Route-split version
+#
+# - /ingest  → データ投入
+# - /query   → データ取得（Flux）
+# - /health  → 生存確認
+# - Mode-switch (sandbox / prod)
+# - FastAPI router 統合
+#
 
-app = Flask(__name__)
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-# -----------------------------------------------------
-# InfluxDB base settings (共通) 
-# -----------------------------------------------------
-INFLUX_URL = os.getenv("INFLUX_URL")
-INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
-INFLUX_ORG = os.getenv("INFLUX_ORG")
-
-# バケット切り替え用
-BUCKETS = {
-    "prod": os.getenv("INFLUX_BUCKET"),        # 本番
-    "sandbox": os.getenv("INFLUX_BUCKET_SB"),  # sandbox モード
-}
-
-client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-write_api = client.write_api(write_options=WriteOptions(batch_size=1))
-query_api = client.query_api()
-
-# Normalizer
-normalizer = ChronoTraceNormalizer()
+# Routes
+from routes.ingest_api import router as ingest_router
+from routes.query_api import router as query_router
+from routes.health_api import router as health_router
 
 
-# -----------------------------------------------------
-# POST /ingest
-# -----------------------------------------------------
-@app.route("/ingest", methods=["POST"])
-def ingest():
-    raw = request.json
-    if not raw:
-        return jsonify({"status": "error", "reason": "no JSON payload"}), 400
+# -------------------------------
+# FastAPI App
+# -------------------------------
+app = FastAPI(
+    title="ChronoNeura Ingest Server",
+    description="ChronoNeura ingestion/query microservice",
+    version="1.0.0"
+)
 
-    try:
-        # -----------------------------
-        # ① mode 判定
-        # -----------------------------
-        mode = request.args.get("mode", raw.get("mode", "prod"))
-        bucket = BUCKETS.get(mode, BUCKETS["prod"])
+# -------------------------------
+# CORS（ChronoNeura Viewer / Notion / Local dev に対応）
+# -------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],    # 必要ならドメインを絞る
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        # -----------------------------
-        # ② ChronoTrace 正規化
-        # -----------------------------
-        # after
-        normalized = normalizer.normalize_dict(raw)
-
-        # -----------------------------
-        # ③ Influx Point 生成
-        # -----------------------------
-        point = (
-            Point(normalized["measurement"])
-            .time(normalized["timestamp"], WritePrecision.NS)
-        )
-
-        for k, v in normalized["tags"].items():
-            point = point.tag(k, v)
-
-        for k, v in normalized["fields"].items():
-            point = point.field(k, v)
-
-        # -----------------------------
-        # ④ 書き込み (← modeによる bucket 切り替え)
-        # -----------------------------
-        write_api.write(bucket=bucket, record=point)
-
-        return jsonify({
-            "status": "ok",
-            "mode": mode,
-            "bucket": bucket,
-            "normalized": normalized
-        })
-
-    except Exception as e:
-        return jsonify({"status": "error", "reason": str(e)}), 500
+# -------------------------------
+# Routers
+# -------------------------------
+app.include_router(ingest_router, prefix="/ingest", tags=["ingest"])
+app.include_router(query_router, prefix="/query", tags=["query"])
+app.include_router(health_router, prefix="/health", tags=["health"])
 
 
-# -----------------------------------------------------
-# GET /last?measurement=xxx&mode=sandbox
-# -----------------------------------------------------
-@app.route("/last", methods=["GET"])
-def last_record():
-    try:
-        measurement = request.args.get("measurement")
-        if not measurement:
-            return jsonify({"status": "error", "reason": "measurement required"}), 400
-
-        mode = request.args.get("mode", "prod")
-        bucket = BUCKETS.get(mode, BUCKETS["prod"])
-
-        query = f'''
-        from(bucket: "{bucket}")
-          |> range(start: -30d)
-          |> filter(fn: (r) => r._measurement == "{measurement}")
-          |> sort(columns: ["_time"], desc: true)
-          |> limit(n: 1)
-        '''
-
-        tables = query_api.query(query)
-
-        results = []
-        for table in tables:
-            for record in table.records:
-                results.append({
-                    "time": str(record.get_time()),
-                    "field": record.get_field(),
-                    "value": record.get_value(),
-                    "tags": record.values
-                })
-
-        return jsonify({
-            "status": "success",
-            "mode": mode,
-            "bucket": bucket,
-            "data": results
-        })
-
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# -----------------------------------------------------
-# index
-# -----------------------------------------------------
-@app.route("/")
+# -------------------------------
+# Root endpoint（ブラウザ確認用）
+# -------------------------------
+@app.get("/")
 def index():
-    return "ChronoNeura Ingest Server — mode-switch enabled"
-
-
-# -----------------------------------------------------
-# main
-# -----------------------------------------------------
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    return {
+        "service": "ChronoNeura Ingest Server",
+        "mode-switch": "enabled",
+        "routes": {
+            "/ingest": "データ投入",
+            "/query": "クエリ実行",
+            "/health": "動作確認",
+        }
+    }
