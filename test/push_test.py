@@ -5,6 +5,7 @@ from datetime import datetime
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN_AUTOJOURNAL")
 DATABASE_ID = os.environ.get("NOTION_DB_AUTOJOURNAL_ID")
 
+
 def create_notion_entry():
     """Auto-Journal 用最小書き込みテスト"""
 
@@ -48,6 +49,7 @@ def create_notion_entry():
 
     print("Status:", response.status_code)
     print("Response:", response.text)
+
 
 if __name__ == "__main__":
     create_notion_entry()
