@@ -14,7 +14,7 @@ DEVLOG_DB = os.environ["NOTION_DB_DEVLOG_ID"]
 KEY = "20251116-Dev"
 
 # Step 1: page を upsert
-res = client.upsert(
+res = client.upsert_page(
     database_id=DEVLOG_DB,
     match_key="Key",
     match_value=KEY,
