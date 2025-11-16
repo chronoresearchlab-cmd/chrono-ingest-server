@@ -2,140 +2,164 @@ import os
 import requests
 from datetime import datetime
 
+# ============================================================
+# Notion Client – create / update / upsert / query / append-safe
+# ============================================================
 
 class NotionClient:
-    def __init__(self):
-        self.token = os.environ.get("NOTION_TOKEN_AUTOJOURNAL")
-        self.default_db = os.environ.get("NOTION_DB_AUTOJOURNAL_ID")
+    def __init__(self, token=None, default_db=None):
+        """汎用 Notion API クライアント"""
+        self.token = token or os.environ.get("NOTION_TOKEN_AUTOJOURNAL")
+        self.default_db = default_db or os.environ.get("NOTION_DB_AUTOJOURNAL_ID")
 
         if not self.token:
-            raise ValueError("ERROR: NOTION_TOKEN_AUTOJOURNAL is missing!")
+            raise ValueError("ERROR: Notion Token が設定されていません")
 
         self.headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
-            "Notion-Version": "2022-06-28"
+            "Notion-Version": "2022-06-28",
         }
 
-    # ---------------------------------------------
-    # プロパティ value → Notion 形式へ 自動変換
-    # ---------------------------------------------
-    def format_property(self, key, value):
-        """
-        Notion DB のフィールドタイプを意識せず渡せる形式に変換する
-        """
-        # None は無視
-        if value is None:
-            return None
+    # ============================================================
+    # 型自動変換
+    # ============================================================
 
-        # 日付
+    def _convert_value(self, value):
+        """Python の値 → Notion Property に自動変換"""
+
+        # datetime → Notion Date
         if isinstance(value, datetime):
-            return {
-                "date": {
-                    "start": value.isoformat()
-                }
-            }
+            return {"date": {"start": value.isoformat()}}
+
+        # bool
+        if isinstance(value, bool):
+            return {"checkbox": value}
 
         # 数値
         if isinstance(value, (int, float)):
             return {"number": value}
 
-        # 真偽値
-        if isinstance(value, bool):
-            return {"checkbox": value}
+        # 文字列（日付判定込み）
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value)
+                return {"date": {"start": parsed.isoformat()}}
+            except Exception:
+                return {"rich_text": [{"type": "text", "text": {"content": value}}]}
 
-        # リスト（rich_text化）
-        if isinstance(value, list):
-            return {
-                "rich_text": [
-                    {"type": "text", "text": {"content": str(v)}}
-                    for v in value
-                ]
-            }
+        # fallback → 文字列
+        return {"rich_text": [{"type": "text", "text": {"content": str(value)}}]}
 
-        # 文字列（汎用 → rich_text）
-        return {
-            "rich_text": [
-                {"type": "text", "text": {"content": str(value)}}
-            ]
-        }
+    def _build_properties(self, data_dict):
+        props = {}
+        for key, val in data_dict.items():
+            props[key] = self._convert_value(val)
+        return props
 
-    # ---------------------------------------------
-    # CREATE：Notion に新規ページを追加
-    # ---------------------------------------------
-    def create(self, database_id=None, **kwargs):
+    # ============================================================
+    # CREATE
+    # ============================================================
+
+    def create(self, database_id=None, **properties):
         database_id = database_id or self.default_db
-
-        properties = {}
-        for key, value in kwargs.items():
-            pv = self.format_property(key, value)
-            if pv:
-                properties[key] = pv
+        url = "https://api.notion.com/v1/pages"
 
         payload = {
             "parent": {"database_id": database_id},
-            "properties": properties
+            "properties": self._build_properties(properties),
         }
 
-        url = "https://api.notion.com/v1/pages"
-        res = requests.post(url, json=payload, headers=self.headers)
+        res = requests.post(url, headers=self.headers, json=payload)
         return res.json()
 
-    # ---------------------------------------------
-    # UPDATE：ページIDを指定して更新
-    # ---------------------------------------------
-    def update(self, page_id: str, **kwargs):
-        properties = {}
-        for key, value in kwargs.items():
-            pv = self.format_property(key, value)
-            if pv:
-                properties[key] = pv
+    # ============================================================
+    # UPDATE
+    # ============================================================
 
-        payload = {"properties": properties}
-
+    def update(self, page_id, **properties):
         url = f"https://api.notion.com/v1/pages/{page_id}"
-        res = requests.patch(url, json=payload, headers=self.headers)
+        payload = {"properties": self._build_properties(properties)}
+        res = requests.patch(url, headers=self.headers, json=payload)
         return res.json()
 
-    # ---------------------------------------------
-    # UPSERT：Keyプロパティが一致するページがあれば更新、なければ作成
-    # ---------------------------------------------
-    def upsert(self, match_key: str, match_value, database_id=None, **kwargs):
-        database_id = database_id or self.default_db
+    # ============================================================
+    # UPSERT
+    # ============================================================
 
-        # ① まず DB から一致するページを検索
+    def upsert(self, database_id=None, match_key=None, match_value=None, **properties):
+        if match_key is None:
+            raise ValueError("upsert には match_key が必要です")
+
+        database_id = database_id or self.default_db
+        existing = self.find_page_by_key(database_id, match_key, match_value)
+
+        if existing:
+            return self.update(existing["id"], **properties)
+
+        return self.create(database_id, **properties)
+
+    # ============================================================
+    # FIND
+    # ============================================================
+
+    def find_page_by_key(self, database_id, key_name, key_value):
+        database_id = database_id or self.default_db
+        url = f"https://api.notion.com/v1/databases/{database_id}/query"
+
         query = {
             "filter": {
-                "property": match_key,
-                "rich_text": {
-                    "equals": str(match_value)
-                }
+                "property": key_name,
+                "rich_text": {"equals": str(key_value)},
             }
         }
 
-        search_url = f"https://api.notion.com/v1/databases/{database_id}/query"
-        res = requests.post(search_url, json=query, headers=self.headers).json()
+        res = requests.post(url, headers=self.headers, json=query).json()
         results = res.get("results", [])
 
-        # ② あれば UPDATE
-        if len(results) > 0:
-            page_id = results[0]["id"]
-            return self.update(page_id, **kwargs)
+        return results[0] if results else None
 
-        # ③ なければ CREATE
-        return self.create(database_id, **kwargs)
+    # ============================================================
+    # UTIL：ページの既存テキストを取得する
+    # ============================================================
 
-def find_page_by_key(self, database_id, key_name, key_value):
-    query = {
-        "filter": {
-            "property": key_name,
-            "rich_text": {"equals": key_value}
-        }
-    }
-    res = requests.post(
-        f"{self.base_url}/databases/{database_id}/query",
-        headers=self.headers,
-        json=query,
-    )
-    data = res.json()
-    return data["results"][0] if data.get("results") else None
+    def _get_rich_text(self, page, field):
+        """該当フィールドの plain_text を返す"""
+        try:
+            prop = page["properties"][field]
+            rich = prop.get("rich_text", [])
+            return "".join([x["plain_text"] for x in rich])
+        except:
+            return ""
+
+    # ============================================================
+    # APPEND：既存フィールドに追記（Prepend/Append 切替可）
+    # ============================================================
+
+    def append_text(self, page_id, field_name, text, mode="append"):
+        """
+        mode="append" → 既存末尾に追記
+        mode="prepend" → 先頭に追記
+        """
+
+        # 1. 既存データ読み込み
+        page = self.get_page(page_id)
+        current = self._get_rich_text(page, field_name)
+
+        # 2. 新しい本文生成
+        if mode == "append":
+            combined = current + "\n" + text if current else text
+        else:
+            combined = text + "\n" + current if current else text
+
+        # 3. UPDATE
+        return self.update(page_id, **{field_name: combined})
+
+    # ============================================================
+    # GET PAGE（汎用）
+    # ============================================================
+
+    def get_page(self, page_id):
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        res = requests.get(url, headers=self.headers)
+        return res.json()
