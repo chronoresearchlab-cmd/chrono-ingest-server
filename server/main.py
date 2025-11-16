@@ -4,22 +4,22 @@ from utils.notion_client import NotionWriter
 
 app = FastAPI(
     title="ChronoNeura Ingest Server",
-    description="SyncBridge → NotionWriter Integration",
+    description="SyncBridge → NotionWriter Ingest",
     version="1.0.0"
 )
 
-# -------- Input data model ----------
+# -------- Input data model --------
 class NotionIngestModel(BaseModel):
-    mode: str = "create"      # create / upsert / append
-    key: str | None = None    # upsert, append で必須
+    mode: str = "create"    # create / upsert / append
+    key: str | None = None
     title: str | None = None
     summary: str | None = None
     details: str | None = None
     category: list[str] | None = None
-    append: str | None = None # append mode で使用
+    append: str | None = None
 
 
-# -------- API route ----------
+# -------- API route --------
 @app.post("/notion/devlog")
 def ingest_devlog(data: NotionIngestModel):
     """
@@ -29,16 +29,16 @@ def ingest_devlog(data: NotionIngestModel):
     try:
         writer = NotionWriter()
         res = writer.write_dynamic(data.dict())
-
         return {
             "status": "success",
             "page_id": res.get("id"),
             "url": res.get("url")
         }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-# -------- health ----------
+
+
+# -------- health --------
 @app.get("/health")
 def health():
     return {"status": "ok"}
