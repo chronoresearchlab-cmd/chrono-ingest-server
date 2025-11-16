@@ -1,6 +1,11 @@
+import sys
+import os
+
+# プロジェクトのルートディレクトリを import パスに追加
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from utils.notion_client import NotionClient
 from datetime import datetime
-import os
 
 client = NotionClient()
 
