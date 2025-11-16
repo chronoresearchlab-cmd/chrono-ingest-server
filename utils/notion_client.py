@@ -1,155 +1,172 @@
+# utils/notion_client.py
+"""
+ChronoNeura SyncBridge – Notion Writer 正式版（TitleBuilder 分離構造）
+"""
+
 import os
-import json
-import requests
 from typing import Dict, Any, Optional
-from utils.notion_title_builder import generate_title
 
-class NotionClient:
-    """
-    Notion API wrapper supporting:
-    - create page
-    - update page
-    - upsert (search by Key → update or create)
-    - append (for Details rich_text)
-    """
+from notion_client import Client
+from utils.notion_title_builder import TitleBuilder
 
-    def __init__(self, notion_token: Optional[str] = None):
-        self.token = notion_token or os.environ.get("NOTION_TOKEN_AUTOJOURNAL")
-        if not self.token:
-            raise ValueError("Missing Notion token (NOTION_TOKEN_AUTOJOURNAL)")
 
-        self.headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
-        }
+# ============================================================
+# Trace層：Notion API の低レベルクラス（通信・変換のみ）
+# ============================================================
+class NotionClientCore:
+    """Notion API の生I/O層"""
 
-    # --------------------------------------------------------
-    # 共通 request
-    # --------------------------------------------------------
-    def _request(self, method: str, url: str, payload: Dict[str, Any]):
-        r = requests.request(method, url, headers=self.headers, data=json.dumps(payload))
-        if not r.ok:
-            raise Exception(f"Notion API Error: {r.text}")
-        return r.json()
+    def __init__(self, token_env="NOTION_TOKEN_AUTOJOURNAL"):
+        token = os.getenv(token_env)
+        if not token:
+            raise RuntimeError(f"環境変数 {token_env} が未設定です。")
 
-    # --------------------------------------------------------
-    # property builder（型に応じて Notion JSON を生成）
-    # --------------------------------------------------------
-    def _build_property(self, field_type: str, value: Any) -> Dict[str, Any]:
-        if value is None:
-            return {}
+        self.client = Client(auth=token)
 
-        # --- multi_select（重要） ---
-        if field_type == "multi_select":
-            if isinstance(value, str):
-                options = [{"name": value}]
-            elif isinstance(value, (list, tuple)):
-                options = [{"name": v} for v in value]
-            else:
-                options = [{"name": str(value)}]
-            return {"multi_select": options}
+    # --- property builder ---
+    def build_prop(self, t: str, v: Any):
+        if v is None:
+            return None
 
-        # --- title ---
-        if field_type == "title":
-            return {
-                "title": [
-                    {"type": "text", "text": {"content": str(value)}}
-                ]
-            }
+        if t == "title":
+            return {"title": [{"text": {"content": str(v)}}]}
 
-        # --- rich_text ---
-        if field_type == "rich_text":
-            return {
-                "rich_text": [
-                    {"type": "text", "text": {"content": str(value)}}
-                ]
-            }
+        if t == "rich_text":
+            return {"rich_text": [{"text": {"content": str(v)}}]}
 
-        # --- date ---
-        if field_type == "date":
-            if hasattr(value, "isoformat"):
-                value = value.isoformat()
-            return {"date": {"start": value}}
+        if t == "multi_select":
+            if isinstance(v, str):
+                v = [v]
+            return {"multi_select": [{"name": x} for x in v]}
 
-        # fallback（すべて rich_text にする）
-        return {
-            "rich_text": [
-                {"type": "text", "text": {"content": str(value)}}
-            ]
-        }
+        return {"rich_text": [{"text": {"content": str(v)}}]}
 
-    # ---- Title 自動生成（モジュール呼び出し）----
-if "Title" not in properties or not properties["Title"]:
-    properties["Title"] = generate_title(properties)
-    
-    # --------------------------------------------------------
-    # Create
-    # --------------------------------------------------------
-    def create_page(self, database_id: str, properties: Dict[str, Any]):
-        url = "https://api.notion.com/v1/pages"
-        payload = {
-            "parent": {"database_id": database_id},
-            "properties": properties,
-        }
-        return self._request("POST", url, payload)
+    # --- create ---
+    def create_page(self, db_id: str, props: Dict[str, Any]):
+        return self.client.pages.create(
+            parent={"database_id": db_id},
+            properties=props
+        )
 
-    # --------------------------------------------------------
-    # Update
-    # --------------------------------------------------------
-    def update_page(self, page_id: str, properties: Dict[str, Any]):
-        url = f"https://api.notion.com/v1/pages/{page_id}"
-        payload = {"properties": properties}
-        return self._request("PATCH", url, payload)
+    # --- update ---
+    def update_page(self, page_id: str, props: Dict[str, Any]):
+        return self.client.pages.update(page_id, properties=props)
 
-    # --------------------------------------------------------
-    # Search → Key が一致するページを探す
-    # --------------------------------------------------------
-    def find_page_by_key(self, database_id: str, key_property: str, key_value: str):
-        url = f"https://api.notion.com/v1/databases/{database_id}/query"
-        payload = {
-            "filter": {
-                "property": key_property,
-                "rich_text": {"equals": key_value},
-            }
-        }
-        res = self._request("POST", url, payload)
-        results = res.get("results", [])
-        return results[0] if results else None
+    # --- query ---
+    def query_by_key(self, db_id: str, key: str, value: str):
+        res = self.client.databases.query(
+            database_id=db_id,
+            filter={"property": key, "rich_text": {"equals": value}}
+        )
+        arr = res.get("results", [])
+        return arr[0] if arr else None
 
-    # --------------------------------------------------------
-    # Upsert（存在すれば update、無ければ create）
-    # --------------------------------------------------------
-    def upsert_page(
-        self,
-        database_id: str,
-        key_property: str,
-        key_value: str,
-        properties: Dict[str, Any]
-    ):
-        found = self.find_page_by_key(database_id, key_property, key_value)
 
-        if found:
-            page_id = found["id"]
-            return self.update_page(page_id, properties)
+# ============================================================
+# SyncBridge層：Writer（create / upsert / append を統合した高層）
+# ============================================================
+class NotionWriter(NotionClientCore):
+    """外部 dict を受け取り、Notion DB へ書き込む高層 Writer"""
 
-        return self.create_page(database_id, properties)
+    def __init__(self,
+                 token_env="NOTION_TOKEN_AUTOJOURNAL",
+                 db_env="NOTION_DB_DEVLOG_ID"):
 
-    # --------------------------------------------------------
-    # Append：Details に追記（改行付き）
-    # --------------------------------------------------------
-    def append_to_page(self, database_id: str, key_property: str, key_value: str, append_text: str):
-        page = self.find_page_by_key(database_id, key_property, key_value)
+        super().__init__(token_env)
+
+        db_id = os.getenv(db_env)
+        if not db_id:
+            raise RuntimeError(f"環境変数 {db_env} が未設定です。")
+
+        self.db_id = db_id
+
+    # ---------------------------------------------------------
+    # create
+    # ---------------------------------------------------------
+    def write_create(self, data: Dict[str, Any]):
+        props = self._convert(data)
+        return self.create_page(self.db_id, props)
+
+    # ---------------------------------------------------------
+    # upsert（存在すれば更新・無ければ生成）
+    # ---------------------------------------------------------
+    def write_upsert(self, key: str, data: Dict[str, Any]):
+        page = self.query_by_key(self.db_id, "Key", key)
+        props = self._convert(data)
+
+        if page:
+            return self.update_page(page["id"], props)
+
+        return self.create_page(self.db_id, props)
+
+    # ---------------------------------------------------------
+    # append（Details に追記）
+    # ---------------------------------------------------------
+    def write_append(self, key: str, text: str):
+        page = self.query_by_key(self.db_id, "Key", key)
         if not page:
-            raise ValueError("Page not found for append.")
+            raise RuntimeError(f"append 対象 key={key} のページが見つかりません")
 
         page_id = page["id"]
-        existing = page["properties"].get("Details", {}).get("rich_text", [])
+        existing = page["properties"]["Details"]["rich_text"]
+        merged = existing + [{"text": {"content": "\n" + text}}]
 
-        merged = existing + [
-            {"type": "text", "text": {"content": "\n" + append_text}}
-        ]
+        return self.update_page(
+            page_id,
+            {"Details": {"rich_text": merged}}
+        )
 
-        payload = {"properties": {"Details": {"rich_text": merged}}}
-        url = f"https://api.notion.com/v1/pages/{page_id}"
-        return self._request("PATCH", url, payload)
+    # ---------------------------------------------------------
+    # 動的モード判定（create / upsert / append 自動判別）
+    # ---------------------------------------------------------
+    def write_dynamic(self, data: Dict[str, Any]):
+        mode = data.get("mode", "create")
+
+        if mode == "create":
+            return self.write_create(data)
+
+        if mode == "upsert":
+            if "key" not in data:
+                raise RuntimeError("upsert には 'key' が必要です。")
+            return self.write_upsert(data["key"], data)
+
+        if mode == "append":
+            if "key" not in data or "append" not in data:
+                raise RuntimeError("append には 'key' と 'append' が必要です。")
+            return self.write_append(data["key"], data["append"])
+
+        raise RuntimeError(f"未知の mode：{mode}")
+
+    # ============================================================
+    # property 変換（TitleBuilder による Title 自動生成も含む）
+    # ============================================================
+    def _convert(self, data: Dict[str, Any]):
+        props = {}
+
+        # --- 基本構造 ---
+        if "title" in data:
+            props["Title"] = self.build_prop("title", data["title"])
+
+        if "details" in data:
+            props["Details"] = self.build_prop("rich_text", data["details"])
+
+        if "summary" in data:
+            props["Summary"] = self.build_prop("rich_text", data["summary"])
+
+        if "category" in data:
+            props["Category"] = self.build_prop("multi_select", data["category"])
+
+        if "key" in data:
+            props["Key"] = self.build_prop("rich_text", data["key"])
+
+        # --- Title 自動生成ロジック（空なら自動生成） ---
+        if "Title" not in props or not props["Title"]:
+            title_text = TitleBuilder.generate({
+                "Category": data.get("category"),
+                "Key": data.get("key"),
+                "Summary": data.get("summary"),
+                "Details": data.get("details"),
+            })
+            props["Title"] = self.build_prop("title", title_text)
+
+        return props
