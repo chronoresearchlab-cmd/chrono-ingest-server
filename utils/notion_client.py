@@ -2,7 +2,7 @@ import os
 import json
 import requests
 from typing import Dict, Any, Optional
-
+from utils.notion_title_builder import generate_title
 
 class NotionClient:
     """
@@ -79,6 +79,10 @@ class NotionClient:
             ]
         }
 
+    # ---- Title 自動生成（モジュール呼び出し）----
+if "Title" not in properties or not properties["Title"]:
+    properties["Title"] = generate_title(properties)
+    
     # --------------------------------------------------------
     # Create
     # --------------------------------------------------------
