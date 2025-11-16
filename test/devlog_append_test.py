@@ -1,6 +1,6 @@
 # test/devlog_append_test.py
 # ------------------------------------------------------------
-# ChronoNeura DevLog 用 Notion Append テスト（完全安定版）
+# ChronoNeura DevLog 用 Notion Append テスト（完全安定版）　
 # ------------------------------------------------------------
 
 import sys
