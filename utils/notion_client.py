@@ -1,60 +1,87 @@
-# utils/notion_client.py
-
 import os
+import json
 import requests
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 
 class NotionClient:
-    def __init__(self):
-        self.token = os.getenv("NOTION_TOKEN_AUTOJOURNAL") or os.getenv("NOTION_TOKEN")
+    """
+    Notion API wrapper supporting:
+    - create page
+    - update page
+    - upsert (search by Key → update or create)
+    - append (for Details rich_text)
+    """
+
+    def __init__(self, notion_token: Optional[str] = None):
+        self.token = notion_token or os.environ.get("NOTION_TOKEN_AUTOJOURNAL")
+        if not self.token:
+            raise ValueError("Missing Notion token (NOTION_TOKEN_AUTOJOURNAL)")
+
         self.headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
             "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
         }
 
-    # ------------------------------
-    # 低レベル API 呼び出し
-    # ------------------------------
-    def _request(self, method: str, url: str, payload: Dict[str, Any] = None):
-        resp = requests.request(method, url, headers=self.headers, json=payload)
-        if not resp.ok:
-            raise Exception(
-                f"Notion API Error {resp.status_code}: {resp.text}"
-            )
-        return resp.json()
+    # --------------------------------------------------------
+    # 共通 request
+    # --------------------------------------------------------
+    def _request(self, method: str, url: str, payload: Dict[str, Any]):
+        r = requests.request(method, url, headers=self.headers, data=json.dumps(payload))
+        if not r.ok:
+            raise Exception(f"Notion API Error: {r.text}")
+        return r.json()
 
-    # ------------------------------
-    # プロパティ生成ユーティリティ
-    # ------------------------------
-    def _build_property(self, field_type: str, value: Any):
-        """
-        Notion DB に合わせた動的プロパティビルダー
-        """
-        if field_type == "title":
-            return {"title": [{"type": "text", "text": {"content": value}}]}
+    # --------------------------------------------------------
+    # property builder（型に応じて Notion JSON を生成）
+    # --------------------------------------------------------
+    def _build_property(self, field_type: str, value: Any) -> Dict[str, Any]:
+        if value is None:
+            return {}
 
-        if field_type == "rich_text":
-            return {"rich_text": [{"type": "text", "text": {"content": value}}]}
-
+        # --- multi_select（重要） ---
         if field_type == "multi_select":
-            if isinstance(value, list):
-                return {"multi_select": [{"name": v} for v in value]}
+            if isinstance(value, str):
+                options = [{"name": value}]
+            elif isinstance(value, (list, tuple)):
+                options = [{"name": v} for v in value]
             else:
-                return {"multi_select": [{"name": value}]}
+                options = [{"name": str(value)}]
+            return {"multi_select": options}
 
-        if field_type == "select":
-            return {"select": {"name": value}}
+        # --- title ---
+        if field_type == "title":
+            return {
+                "title": [
+                    {"type": "text", "text": {"content": str(value)}}
+                ]
+            }
 
-        if field_type == "number":
-            return {"number": value}
+        # --- rich_text ---
+        if field_type == "rich_text":
+            return {
+                "rich_text": [
+                    {"type": "text", "text": {"content": str(value)}}
+                ]
+            }
 
-        return None
+        # --- date ---
+        if field_type == "date":
+            if hasattr(value, "isoformat"):
+                value = value.isoformat()
+            return {"date": {"start": value}}
 
-    # ------------------------------
-    # ページ作成
-    # ------------------------------
+        # fallback（すべて rich_text にする）
+        return {
+            "rich_text": [
+                {"type": "text", "text": {"content": str(value)}}
+            ]
+        }
+
+    # --------------------------------------------------------
+    # Create
+    # --------------------------------------------------------
     def create_page(self, database_id: str, properties: Dict[str, Any]):
         url = "https://api.notion.com/v1/pages"
         payload = {
@@ -63,76 +90,62 @@ class NotionClient:
         }
         return self._request("POST", url, payload)
 
-    # ------------------------------
-    # Upsert（存在すれば Update、なければ Create）
-    # ------------------------------
+    # --------------------------------------------------------
+    # Update
+    # --------------------------------------------------------
+    def update_page(self, page_id: str, properties: Dict[str, Any]):
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        payload = {"properties": properties}
+        return self._request("PATCH", url, payload)
+
+    # --------------------------------------------------------
+    # Search → Key が一致するページを探す
+    # --------------------------------------------------------
+    def find_page_by_key(self, database_id: str, key_property: str, key_value: str):
+        url = f"https://api.notion.com/v1/databases/{database_id}/query"
+        payload = {
+            "filter": {
+                "property": key_property,
+                "rich_text": {"equals": key_value},
+            }
+        }
+        res = self._request("POST", url, payload)
+        results = res.get("results", [])
+        return results[0] if results else None
+
+    # --------------------------------------------------------
+    # Upsert（存在すれば update、無ければ create）
+    # --------------------------------------------------------
     def upsert_page(
         self,
         database_id: str,
         key_property: str,
         key_value: str,
-        properties: Dict[str, Any],
+        properties: Dict[str, Any]
     ):
-        # 1) Search
-        search_url = "https://api.notion.com/v1/databases/{}/query".format(database_id)
+        found = self.find_page_by_key(database_id, key_property, key_value)
 
-        query_payload = {
-            "filter": {
-                "property": key_property,
-                "rich_text": {
-                    "equals": key_value
-                }
-            }
-        }
+        if found:
+            page_id = found["id"]
+            return self.update_page(page_id, properties)
 
-        res = self._request("POST", search_url, query_payload)
-
-        page_id = None
-        if res.get("results"):
-            page_id = res["results"][0]["id"]
-
-        # 2) Update
-        if page_id:
-            update_url = f"https://api.notion.com/v1/pages/{page_id}"
-            payload = {"properties": properties}
-            return self._request("PATCH", update_url, payload)
-
-        # 3) Create
         return self.create_page(database_id, properties)
 
-    # ------------------------------
-    # Append（既存ページの RichText に追記）
-    # ------------------------------
-    def append_to_page(self, page_id: str, property_name: str, append_text: str):
-        """
-        Notion の rich_text プロパティにテキストを追記する
-        """
-        # 現在のページ内容を取得
-        page_url = f"https://api.notion.com/v1/pages/{page_id}"
-        page = self._request("GET", page_url, None)
+    # --------------------------------------------------------
+    # Append：Details に追記（改行付き）
+    # --------------------------------------------------------
+    def append_to_page(self, database_id: str, key_property: str, key_value: str, append_text: str):
+        page = self.find_page_by_key(database_id, key_property, key_value)
+        if not page:
+            raise ValueError("Page not found for append.")
 
-        current_prop = page["properties"].get(property_name)
-        if not current_prop:
-            raise Exception(f"Property '{property_name}' not found in the page.")
+        page_id = page["id"]
+        existing = page["properties"].get("Details", {}).get("rich_text", [])
 
-        # すでにある rich_text
-        existing = current_prop.get("rich_text", [])
+        merged = existing + [
+            {"type": "text", "text": {"content": "\n" + append_text}}
+        ]
 
-        # 新しい text block を末尾に追加
-        new_block = {
-            "type": "text",
-            "text": {"content": "\n" + append_text}
-        }
-
-        updated_text = existing + [new_block]
-
-        update_payload = {
-            "properties": {
-                property_name: {
-                    "rich_text": updated_text
-                }
-            }
-        }
-
-        update_url = f"https://api.notion.com/v1/pages/{page_id}"
-        return self._request("PATCH", update_url, update_payload)
+        payload = {"properties": {"Details": {"rich_text": merged}}}
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        return self._request("PATCH", url, payload)
