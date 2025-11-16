@@ -1,4 +1,5 @@
 fastapi
-uvicorn[standard]
-influxdb-client
+uvicorn
+notion-client
+pydantic
 python-dotenv
