@@ -38,3 +38,7 @@ def ingest_devlog(data: NotionIngestModel):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+# -------- health ----------
+@app.get("/health")
+def health():
+    return {"status": "ok"}
