@@ -1,27 +1,25 @@
+import sys
+import os
+
+# プロジェクト root を sys.path に追加
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(PROJECT_ROOT)
+
 from utils.notion_client import NotionClient
 
 client = NotionClient()
 
-DATABASE_ID = os.getenv("NOTION_DB_DEVLOG_ID")
+devlog_data = {
+    "Category": ["開発"],
+    "Key": "test-key-001",
+    "Details": "これは append テスト",
+}
 
-# Step1: Upsert（タイトル・日付などをキーで固定）
-page = client.upsert_page(
-    database_id=DATABASE_ID,
+res = client.upsert_page(
+    database_id=os.getenv("NOTION_DB_DEVLOG_ID"),
     key_property="Key",
-    key_value="2025-11-16",
-    properties={
-        "Key": {"rich_text": [{"type": "text", "text": {"content": "2025-11-16"}}]},
-        "Title": {"title": [{"type": "text", "text": {"content": "DevLog 2025-11-16"}}]},
-        "Category": {"multi_select": [{"name": "開発"}]},
-        "Details": {"rich_text": [{"type": "text", "text": {"content": "初期生成"}}]},
-    }
+    key_value=devlog_data["Key"],
+    properties=devlog_data,
 )
 
-page_id = page["id"]
-
-# Step2: Append（Details に追記）
-client.append_to_page(
-    page_id,
-    property_name="Details",
-    append_text="追記テキスト：Notion Append テスト"
-)
+print("Upsert result:", res)
