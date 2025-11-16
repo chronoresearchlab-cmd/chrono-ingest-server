@@ -1,89 +1,191 @@
-# utils/notion_client.py
-"""
-汎用 Notion クライアント（Upsert / Update / Append 対応）
-ChronoNeura Auto-Journal / DevLog 用の共通 Notion API ラッパー
-
-機能：
-- create_page()
-- update_page()
-- upsert_page()（Key=タイトルで検索 → 存在すれば更新、なければ作成）
-- append_to_property()（既存テキストへ追記）
-
-共通仕様：
-- プロパティは Notion DB の型を見て自動変換
-- multi_select は [{"name": value}] の配列に変換（← **今回修正ポイント**）
-- rich_text は [{"type":"text","text":{"content": "..."} }] に統一
-"""
-
 import os
 import requests
 from datetime import datetime
+from typing import Dict, Any, Optional, List
 
 
 class NotionClient:
-    def __init__(self, token: str):
-        self.token = token
-        self.base_url = "https://api.notion.com/v1"
+    """
+    Notion API 用ミニマルクライアント（Create / Update / Upsert / Append 対応）
+    """
+
+    def __init__(self):
+        self.token = os.getenv("NOTION_TOKEN_AUTOJOURNAL")
+        if not self.token:
+            raise RuntimeError("ERROR: NOTION_TOKEN_AUTOJOURNAL が読み込めませんでした")
+
         self.headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
             "Notion-Version": "2022-06-28",
         }
 
-    # -----------------------------------------------------
-    # Internal API Caller
-    # -----------------------------------------------------
-    def _request(self, method, endpoint, json=None):
-        url = f"{self.base_url}{endpoint}"
-        resp = requests.request(method, url, headers=self.headers, json=json)
+    # --------------------------------------------------
+    # 内部ユーティリティ
+    # --------------------------------------------------
+
+    def _request(self, method: str, url: str, data: Optional[Dict] = None):
+        endpoint = f"https://api.notion.com/v1{url}"
+        resp = requests.request(method, endpoint, headers=self.headers, json=data)
 
         if not resp.ok:
-            print(f"[Notion ERROR] {resp.status_code} {resp.text}")
+            print(f"[Notion API ERROR] {resp.status_code} {resp.text}")
+            return None
+
         return resp.json()
 
-    # -----------------------------------------------------
-    # Utility: Notion プロパティ型へ自動変換
-    # -----------------------------------------------------
-    def _convert_property(self, key, value, prop_type):
+    def _get_page(self, page_id: str):
+        return self._request("GET", f"/pages/{page_id}")
+
+    # --------------------------------------------------
+    # プロパティ生成ユーティリティ
+    # --------------------------------------------------
+
+    def _build_property(self, field_type: str, value: Any):
         """
-        Notion データベースのプロパティ型に合わせて自動変換する。
+        Notion の各プロパティ型に応じて正しい JSON を作成する。
         """
-        # --- Title ---
-        if prop_type == "title":
+
+        # ---- Rich Text ----
+        if field_type == "rich_text":
             return {
-                "title": [{"type": "text", "text": {"content": str(value)}}]
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {"content": str(value)}
+                    }
+                ]
             }
 
-        # --- Rich Text ---
-        if prop_type == "rich_text":
+        # ---- Title ----
+        if field_type == "title":
             return {
-                "rich_text": [{"type": "text", "text": {"content": str(value)}}]
+                "title": [
+                    {
+                        "type": "text",
+                        "text": {"content": str(value)}
+                    }
+                ]
             }
 
-        # --- Multi-select ---
-        if prop_type == "multi_select":
-            # 文字列単体なら ["value"] にする
-            if isinstance(value, str):
-                return {"multi_select": [{"name": value}]}
-            # 配列なら [{"name":...}] 列に変換
+        # ---- Date ----
+        if field_type == "date":
+            return {
+                "date": {"start": value}
+            }
+
+        # ---- Multi-select ----
+        if field_type == "multi_select":
             if isinstance(value, list):
                 return {"multi_select": [{"name": v} for v in value]}
-            raise ValueError(f"Invalid multi_select value for {key}: {value}")
+            else:
+                return {"multi_select": [{"name": value}]}
 
-        # --- Date ---
-        if prop_type == "date":
-            if isinstance(value, datetime):
-                value = value.isoformat()
-            return {"date": {"start": value}}
+        # ---- Select ----
+        if field_type == "select":
+            return {"select": {"name": str(value)}}
 
-        # --- Toggle / Checkbox ---
-        if prop_type == "checkbox":
+        # ---- Checkbox ----
+        if field_type == "checkbox":
             return {"checkbox": bool(value)}
 
-        # --- Number ---
-        if prop_type == "number":
+        # ---- Number ----
+        if field_type == "number":
             return {"number": float(value)}
 
-        # --- Fallback (Auto Rich Text) ---
+        # ---- 任意文字列 ----
         return {
-            "rich_text": [{"type":
+            "rich_text": [
+                {"type": "text", "text": {"content": str(value)}}
+            ]
+        }
+
+    # --------------------------------------------------
+    # Upsert（Create or Update）
+    # --------------------------------------------------
+
+    def upsert_page(
+        self,
+        database_id: str,
+        key_property: str,
+        key_value: str,
+        properties: Dict[str, Any]
+    ):
+        """
+        key_property（例: Key） が一致するページを検索 → 存在すれば Update、無ければ Create。
+        """
+
+        # ---- Search ----
+        query_payload = {
+            "filter": {
+                "property": key_property,
+                "rich_text": {"equals": key_value}
+            }
+        }
+        search = self._request("POST", f"/databases/{database_id}/query", query_payload)
+
+        page_id = None
+        if search and search.get("results"):
+            page_id = search["results"][0]["id"]
+
+        # ---- properties を Notion JSON に変換 ----
+        props_json = {}
+        for prop_name, prop_value in properties.items():
+            if isinstance(prop_value, tuple) and len(prop_value) == 2:
+                field_type, val = prop_value
+            else:
+                field_type, val = ("rich_text", prop_value)
+
+            props_json[prop_name] = self._build_property(field_type, val)
+
+        # ---- Update or Create ----
+        if page_id:
+            payload = {"properties": props_json}
+            return self._request("PATCH", f"/pages/{page_id}", payload)
+        else:
+            payload = {
+                "parent": {"database_id": database_id},
+                "properties": props_json
+            }
+            return self._request("POST", "/pages", payload)
+
+    # --------------------------------------------------
+    # Append（Rich text に追記）
+    # --------------------------------------------------
+
+    def append_to_property(self, page_id: str, property_name: str, append_text: str):
+        """
+        Rich text プロパティに追記する。
+        """
+
+        page = self._get_page(page_id)
+        if not page:
+            raise RuntimeError("Page not found")
+
+        props = page.get("properties", {})
+        if property_name not in props:
+            raise ValueError(f"Property {property_name} not found")
+
+        existing_prop = props[property_name]
+
+        # 既存テキスト抽出
+        old_text = ""
+        if "rich_text" in existing_prop:
+            old_text = "".join(rt.get("plain_text", "") for rt in existing_prop["rich_text"])
+
+        new_text = old_text + "\n" + append_text
+
+        payload = {
+            "properties": {
+                property_name: {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {"content": new_text}
+                        }
+                    ]
+                }
+            }
+        }
+
+        return self._request("PATCH", f"/pages/{page_id}", payload)
