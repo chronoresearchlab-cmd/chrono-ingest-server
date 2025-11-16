@@ -124,3 +124,18 @@ class NotionClient:
 
         # ③ なければ CREATE
         return self.create(database_id, **kwargs)
+
+def find_page_by_key(self, database_id, key_name, key_value):
+    query = {
+        "filter": {
+            "property": key_name,
+            "rich_text": {"equals": key_value}
+        }
+    }
+    res = requests.post(
+        f"{self.base_url}/databases/{database_id}/query",
+        headers=self.headers,
+        json=query,
+    )
+    data = res.json()
+    return data["results"][0] if data.get("results") else None
